@@ -7,7 +7,8 @@ Description: Fit Mixed Membership Stochastic Block Models (MMSBM) for
     recommendation systems via expectation-maximization. Based on 
     Godoy-Lorite et al. (2016).
 License: BSD_3_clause + file LICENSE
-URL: https://github.com/eudald-seeslab/mmsbm
+URL: https://github.com/eudald-seeslab/mmsbm-R
+BugReports: https://github.com/eudald-seeslab/mmsbm-R/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
