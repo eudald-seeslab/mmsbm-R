@@ -122,7 +122,3 @@ devtools::test()
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
-
-## References
-
-[1] Godoy-Lorite, Antonia, et al. "Accurate and scalable social recommendation using mixed-membership stochastic block models." *Proceedings of the National Academy of Sciences* 113.50 (2016): 14207-14212.
