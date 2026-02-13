@@ -1,6 +1,8 @@
-# Mixed Membership Stochastic Block Models for R
+# mmsbm <img src="man/figures/logo.png" align="right" height="139" alt="mmsbm logo" />
 
+<!-- badges: start -->
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+<!-- badges: end -->
 
 An R implementation of Mixed Membership Stochastic Block Models (MMSBM) for recommendation systems, based on the work by Godoy-Lorite et al. (2016). This package provides an efficient, vectorized implementation using base R array operations for the hot path and parallel processing via the [future](https://future.futureverse.org/) framework.
 
@@ -8,15 +10,14 @@ This is an R port of the [Python mmsbm package](https://github.com/eudald-seesla
 
 ## Features
 
-- Fast, vectorized EM implementation using base R arrays (`rowsum()`, matrix multiplication).
+- Fast, vectorized EM implementation.
 - Support for both simple and cross-validated fitting.
-- Parallel processing for multiple sampling runs via [future](https://future.futureverse.org/) / [future.apply](https://future.apply.futureverse.org/).
-- Progress bars via [progressr](https://progressr.futureverse.org/).
-- Comprehensive model statistics and evaluation metrics.
+- Parallel processing for multiple sampling runs.
+- Model statistics and evaluation metrics.
 
 ## Installation
 
-Install directly from GitHub:
+From GitHub:
 
 ```r
 # install.packages("devtools")
@@ -69,6 +70,8 @@ plan(multisession)  # use multiple R sessions
 
 # Now fit the model -- sampling runs will execute in parallel
 model <- fit(model, train)
+
+plan(sequential) # Go back to sequential after fitting
 ```
 
 ### Training Methods
@@ -107,6 +110,23 @@ results$stats$mae
 results$objects$theta  # User group memberships
 results$objects$eta    # Item group memberships
 results$objects$pr     # Rating probabilities
+```
+
+## Tidy
+
+You can of course go all the way tidy:
+
+```r
+reuslts <- mmsbm(
+  user_groups = 2,
+  item_groups = 4,
+  iterations  = 500,
+  sampling    = 5,
+  seed        = 1
+) |> 
+  fit(train) |>
+  predict(test) |>
+  score()
 ```
 
 ## Running Tests
