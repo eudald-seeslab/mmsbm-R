@@ -41,9 +41,14 @@ test_that("unseen users in test are dropped with warning", {
   enc <- create_encoding()
   train_mat <- format_train_data(train_df, enc)
 
+  # Both u3 (unseen user) and i3 (unseen item) produce warnings
+  # Warnings explain why predictions are impossible for unseen nodes
   expect_warning(
-    test_mat <- format_test_data(test_df, enc),
-    "u3"
+    expect_warning(
+      test_mat <- format_test_data(test_df, enc),
+      "unseen users.*u3.*theta"
+    ),
+    "unseen items.*i3.*eta"
   )
   # u3 and i3 should both be dropped (same row)
   expect_equal(nrow(test_mat), 1L)
@@ -70,7 +75,7 @@ test_that("unseen items in test are dropped with warning", {
 
   expect_warning(
     test_mat <- format_test_data(test_df, enc),
-    "i3"
+    "unseen items.*i3.*eta"
   )
   expect_equal(nrow(test_mat), 1L)
   expect_true(is.integer(test_mat))
@@ -96,7 +101,7 @@ test_that("unseen ratings in test are dropped with warning", {
 
   expect_warning(
     test_mat <- format_test_data(test_df, enc),
-    "3"
+    "unseen ratings.*3.*probability tensor"
   )
   expect_equal(nrow(test_mat), 1L)
   expect_true(is.integer(test_mat))

@@ -82,6 +82,66 @@ format_train_data <- function(data, encoding) {
 }
 
 
+#' Identify which rows of test data can be encoded
+#'
+#' Returns a logical mask indicating rows where all values (users, items,
+#' ratings) were seen during training. Emits warnings for unseen values,
+#' explaining why predictions are not possible for them.
+#'
+#' @param data A data.frame (or tibble) with three columns: users, items, ratings.
+#' @param encoding An encoding environment populated by `format_train_data()`.
+#' @return A logical vector of length `nrow(data)`.
+#' @keywords internal
+find_encodable_rows <- function(data, encoding) {
+  data <- tibble::as_tibble(data)
+  data <- dplyr::mutate(data, dplyr::across(dplyr::everything(), as.character))
+
+  col_info <- list(
+    list(
+      name = "users", dict = encoding$obs_dict,
+      reason = paste0(
+        "The model has no learned group memberships (theta) for unseen users, ",
+        "because MMSBM estimates memberships from observed interactions only. "
+      )
+    ),
+    list(
+      name = "items", dict = encoding$items_dict,
+      reason = paste0(
+        "The model has no learned group memberships (eta) for unseen items, ",
+        "because MMSBM estimates memberships from observed interactions only. "
+      )
+    ),
+    list(
+      name = "ratings", dict = encoding$ratings_dict,
+      reason = paste0(
+        "The model's rating probability tensor (pr) only covers levels seen ",
+        "during training, so it cannot assign probabilities to new levels. "
+      )
+    )
+  )
+
+  keep <- rep(TRUE, nrow(data))
+  for (info in col_info) {
+    col_idx <- match(info$name, c("users", "items", "ratings"))
+    unseen <- setdiff(unique(data[[col_idx]]), names(info$dict))
+    if (length(unseen) > 0L) {
+      affected <- sum(data[[col_idx]] %in% unseen)
+      warning(
+        "Dropping ", affected, " observation(s) with unseen ",
+        info$name, " not present in the training set: ",
+        paste(unseen, collapse = ", "), ". ",
+        info$reason,
+        "To predict for new ", info$name,
+        ", include them in the training data and refit the model.",
+        call. = FALSE
+      )
+      keep <- keep & !(data[[col_idx]] %in% unseen)
+    }
+  }
+  keep
+}
+
+
 #' Format test data
 #'
 #' Validates that test users/items/ratings were seen during training, removes
@@ -99,28 +159,8 @@ format_test_data <- function(data, encoding) {
     stop("Data contains missing values. Aborting.")
   }
 
-  # Check each column against training dictionaries
-  col_info <- list(
-    list(name = "users",   dict = encoding$obs_dict),
-    list(name = "items",   dict = encoding$items_dict),
-    list(name = "ratings", dict = encoding$ratings_dict)
-  )
-
-  for (i in seq_along(col_info)) {
-    test_vals  <- unique(data[[i]])
-    train_vals <- names(col_info[[i]]$dict)
-    unseen     <- setdiff(test_vals, train_vals)
-
-    if (length(unseen) > 0L) {
-      warning(
-        "The ", col_info[[i]]$name, " ",
-        paste(unseen, collapse = ", "),
-        " are in the test set but weren't in the train set so I'll remove them.",
-        call. = FALSE
-      )
-      data <- dplyr::filter(data, !(data[[i]] %in% unseen))
-    }
-  }
+  keep <- find_encodable_rows(data, encoding)
+  data <- data[keep, , drop = FALSE]
 
   out <- matrix(
     c(
@@ -172,9 +212,9 @@ return_eta_indices <- function(eta, encoding) {
 return_pr_indices <- function(pr, encoding) {
   inv <- invert_named_int(encoding$ratings_dict)
   R <- dim(pr)[3L]
-  prs <- vector("list", R)
+  prs <- stats::setNames(vector("list", R), inv[seq_len(R)])
   for (r in seq_len(R)) {
-    prs[[inv[r]]] <- tibble::as_tibble(as.data.frame(pr[, , r]))
+    prs[[r]] <- tibble::as_tibble(as.data.frame(pr[, , r]))
   }
   prs
 }

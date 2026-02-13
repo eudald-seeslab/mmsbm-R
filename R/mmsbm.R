@@ -12,14 +12,23 @@
 #' @export
 fit <- function(model, ...) UseMethod("fit")
 
-#' Score a fitted model
+#' Compute model performance metrics
 #' @param model A fitted model object.
 #' @param ... Additional arguments.
 #' @export
-score <- function(model, ...) UseMethod("score")
+metrics <- function(model, ...) UseMethod("metrics")
 
-# Ensure S3 methods have ... for generic consistency
-# (the actual named arguments are listed before ...)
+#' Cross-validated model fitting
+#' @param model A model object.
+#' @param ... Additional arguments.
+#' @export
+cv_fit <- function(model, ...) UseMethod("cv_fit")
+
+#' Augment data with predictions
+#' @param x A fitted model object.
+#' @param ... Additional arguments.
+#' @export
+augment <- function(x, ...) UseMethod("augment")
 
 
 #' Create a Mixed Membership Stochastic Block Model
@@ -46,19 +55,18 @@ mmsbm <- function(user_groups,
     seed        = seed,
     debug       = debug,
     # Populated during fit
-    encoding          = NULL,
-    train             = NULL,
-    ratings           = NULL,
-    results           = NULL,
-    norm_factors      = NULL,
-    # Populated during predict
-    test              = NULL,
-    theta             = NULL,
-    eta               = NULL,
-    pr                = NULL,
-    likelihood        = NULL,
-    prediction_matrix = NULL,
-    start_time        = Sys.time()
+    encoding     = NULL,
+    train        = NULL,
+    ratings      = NULL,
+    results      = NULL,
+    norm_factors = NULL,
+    best_run     = NULL,
+    theta        = NULL,
+    eta          = NULL,
+    pr           = NULL,
+    likelihood   = NULL,
+    # Populated during cv_fit
+    cv_results   = NULL
   )
   class(obj) <- "mmsbm"
   obj
@@ -72,6 +80,17 @@ print.mmsbm <- function(x, ...) {
     "MMSBM model (%s): %d user groups, %d item groups, %d iterations, %d sampling runs\n",
     fitted, x$user_groups, x$item_groups, x$iterations, x$sampling
   ))
+  if (!is.null(x$likelihood)) {
+    cat(sprintf("  Training likelihood: %s\n", format(x$likelihood, digits = 4)))
+  }
+  if (!is.null(x$cv_results)) {
+    cat(sprintf(
+      "  CV accuracy: %s +/- %s (%d folds)\n",
+      format(mean(x$cv_results$accuracy), digits = 4),
+      format(stats::sd(x$cv_results$accuracy), digits = 4),
+      nrow(x$cv_results)
+    ))
+  }
   invisible(x)
 }
 
@@ -121,13 +140,15 @@ prepare_objects <- function(model, train) {
 
 #' Fit the MMSBM model
 #'
-#' Runs multiple parallel EM optimisation runs and stores all results.
+#' Runs multiple parallel EM optimisation runs. The best run is selected by
+#' training likelihood and its parameters (theta, eta, pr) are stored on the
+#' model for use by [predict()], [augment()], and [metrics()].
 #'
 #' @param model An `mmsbm` object.
 #' @param data A data.frame with three columns: users, items, ratings.
 #' @param silent Logical: suppress progress output. Default FALSE.
 #' @param ... Ignored (for S3 generic compatibility).
-#' @return The fitted `mmsbm` object (updated in place via reassignment).
+#' @return The fitted `mmsbm` object.
 #' @export
 fit.mmsbm <- function(model, data, silent = FALSE, ...) {
   if (!silent) {
@@ -162,6 +183,17 @@ fit.mmsbm <- function(model, data, silent = FALSE, ...) {
     )
   }, enable = !silent)
 
+  # Select the best run by training likelihood
+  likelihoods <- vapply(model$results, function(r) r$likelihood, numeric(1L))
+  model$best_run  <- which.max(likelihoods)
+  best <- model$results[[model$best_run]]
+
+  # Store labeled parameters from the best run
+  model$theta      <- return_theta_indices(best$theta, model$encoding)
+  model$eta        <- return_eta_indices(best$eta, model$encoding)
+  model$pr         <- return_pr_indices(best$pr, model$encoding)
+  model$likelihood <- best$likelihood
+
   model
 }
 
@@ -170,73 +202,113 @@ fit.mmsbm <- function(model, data, silent = FALSE, ...) {
 
 #' Predict ratings for new user-item pairs
 #'
+#' Returns a tibble of predictions following tidymodels conventions.
+#' Use `type = "class"` (default) for predicted rating classes or
+#' `type = "prob"` for rating probability distributions.
+#'
 #' @param object A fitted `mmsbm` object.
-#' @param newdata A data.frame with three columns: users, items, ratings.
+#' @param new_data A data.frame with three columns: users, items, ratings.
+#' @param type Character: `"class"` for predicted ratings, `"prob"` for
+#'   probability distributions over rating levels.
 #' @param ... Ignored (for S3 generic compatibility).
-#' @return A numeric matrix (N x R) of rating probability distributions.
+#' @return A tibble. For `type = "class"`: a single `.pred_class` column.
+#'   For `type = "prob"`: one `.pred_{level}` column per rating level.
 #' @export
-predict.mmsbm <- function(object, newdata, ...) {
+predict.mmsbm <- function(object, new_data, type = "class", ...) {
   if (is.null(object$results)) {
     stop("You need to fit the model before predicting.")
   }
 
-  test <- format_test_data(newdata, object$encoding)
-  object$test <- test
+  test <- format_test_data(new_data, object$encoding)
+  best <- object$results[[object$best_run]]
+  rat  <- prod_dist(test, best$theta, best$eta, best$pr)
 
-  # Compute predictions for all runs
-  rats <- lapply(object$results, function(res) {
-    prod_dist(test, res$theta, res$eta, res$pr)
-  })
+  inv_ratings <- invert_named_int(object$encoding$ratings_dict)
 
-  # Choose best run based on accuracy
-  best <- choose_best_run(rats, test, object$ratings)
-
-  # Store best-run parameters with original labels
-  object$theta      <- return_theta_indices(object$results[[best]]$theta, object$encoding)
-  object$eta        <- return_eta_indices(object$results[[best]]$eta, object$encoding)
-  object$pr         <- return_pr_indices(object$results[[best]]$pr, object$encoding)
-  object$likelihood <- object$results[[best]]$likelihood
-
-  # Prediction matrix is the average across all runs
-  rat_array <- array(unlist(rats), dim = c(nrow(rats[[1L]]), ncol(rats[[1L]]), length(rats)))
-  object$prediction_matrix <- rowMeans(rat_array, dims = 2L)
-
-  object
+  if (type == "class") {
+    pred_idx <- max.col(rat, ties.method = "first")
+    tibble::tibble(.pred_class = unname(inv_ratings[pred_idx]))
+  } else if (type == "prob") {
+    prob_df <- tibble::as_tibble(as.data.frame(rat))
+    names(prob_df) <- paste0(".pred_", inv_ratings[seq_len(ncol(rat))])
+    prob_df
+  } else {
+    stop("type must be 'class' or 'prob'.")
+  }
 }
 
 
-# ── score ─────────────────────────────────────────────────────────────────
+# ── augment ───────────────────────────────────────────────────────────────
+
+#' Augment data with model predictions
+#'
+#' Returns the original data with prediction columns appended:
+#' `.pred_class` and one `.pred_{level}` column per rating level.
+#' Rows with unseen users, items, or ratings are dropped (with a warning).
+#'
+#' @param x A fitted `mmsbm` object.
+#' @param new_data A data.frame with three columns: users, items, ratings.
+#' @param ... Ignored (for S3 generic compatibility).
+#' @return A tibble: the encodable rows of `new_data` with prediction columns.
+#' @export
+augment.mmsbm <- function(x, new_data, ...) {
+  if (is.null(x$results)) {
+    stop("You need to fit the model before augmenting.")
+  }
+
+  new_data_tbl <- tibble::as_tibble(new_data)
+
+  # Identify and filter rows with unseen values (warns once here)
+  keep <- find_encodable_rows(new_data_tbl, x$encoding)
+  filtered <- new_data_tbl[keep, , drop = FALSE]
+
+  # Encode and predict in a single pass (no further filtering/warnings)
+  test <- suppressWarnings(format_test_data(filtered, x$encoding))
+  best <- x$results[[x$best_run]]
+  rat  <- prod_dist(test, best$theta, best$eta, best$pr)
+
+  inv_ratings <- invert_named_int(x$encoding$ratings_dict)
+
+  # Build class predictions
+  pred_idx  <- max.col(rat, ties.method = "first")
+  class_col <- tibble::tibble(.pred_class = unname(inv_ratings[pred_idx]))
+
+  # Build probability predictions
+  prob_df <- tibble::as_tibble(as.data.frame(rat))
+  names(prob_df) <- paste0(".pred_", inv_ratings[seq_len(ncol(rat))])
+
+  dplyr::bind_cols(filtered, class_col, prob_df)
+}
+
+
+# ── metrics ───────────────────────────────────────────────────────────────
 
 #' Compute model performance metrics
 #'
-#' @param model A fitted `mmsbm` object (after `predict`).
-#' @param silent Logical: suppress logging. Default FALSE.
+#' Evaluates model predictions against observed ratings. Returns a
+#' yardstick-style tibble with `.metric`, `.estimator`, and `.estimate`
+#' columns.
+#'
+#' @param model A fitted `mmsbm` object.
+#' @param new_data A data.frame with three columns: users, items, ratings.
 #' @param ... Ignored (for S3 generic compatibility).
-#' @return A list with `stats` (accuracy, one_off_accuracy, mae, s2, s2pond,
-#'   likelihood) and `objects` (theta, eta, pr).
+#' @return A tibble with columns `.metric`, `.estimator`, `.estimate`.
 #' @export
-score.mmsbm <- function(model, silent = FALSE, ...) {
-  if (is.null(model$prediction_matrix)) {
-    stop("You need to predict before computing the goodness of fit parameters.")
+metrics.mmsbm <- function(model, new_data, ...) {
+  if (is.null(model$results)) {
+    stop("You need to fit the model before computing metrics.")
   }
 
-  stats <- compute_stats(model$prediction_matrix, model$test, model$ratings)
-  stats$likelihood <- model$likelihood
+  test <- format_test_data(new_data, model$encoding)
+  best <- model$results[[model$best_run]]
+  rat  <- prod_dist(test, best$theta, best$eta, best$pr)
+  stats <- compute_stats(rat, test, model$ratings)
 
-  if (!silent) {
-    elapsed <- as.numeric(difftime(Sys.time(), model$start_time, units = "mins"))
-    message(sprintf("Done %d runs in %.2f minutes.", model$sampling, elapsed))
-    message(sprintf(
-      "The final accuracy is %s, the one off accuracy is %s and the MAE is %s.",
-      format(stats$accuracy, digits = 4),
-      format(stats$one_off_accuracy, digits = 4),
-      format(stats$mae, digits = 4)
-    ))
-  }
-
-  list(
-    stats   = stats,
-    objects = list(theta = model$theta, eta = model$eta, pr = model$pr)
+  tibble::tibble(
+    .metric    = c("accuracy", "one_off_accuracy", "mae", "s2", "s2pond"),
+    .estimator = c("multiclass", "multiclass", "standard", "standard", "standard"),
+    .estimate  = c(stats$accuracy, stats$one_off_accuracy, stats$mae,
+                   stats$s2, stats$s2pond)
   )
 }
 
@@ -245,18 +317,23 @@ score.mmsbm <- function(model, silent = FALSE, ...) {
 
 #' Cross-validated model fitting
 #'
-#' Splits data into k folds and evaluates model performance on held-out data.
+#' Splits data into k folds, fits the model on each training split, and
+#' evaluates on the held-out fold. Returns the model with per-fold metrics
+#' in `model$cv_results` and the best fold's parameters stored on the model.
 #'
 #' @param model An `mmsbm` object.
 #' @param data A data.frame with three columns: users, items, ratings.
 #' @param folds Integer: number of folds. Default 5.
-#' @return A numeric vector of accuracies, one per fold.
+#' @param ... Ignored (for S3 generic compatibility).
+#' @return The `mmsbm` object with `cv_results` (a tibble of per-fold metrics)
+#'   and the best fold's parameters (theta, eta, pr).
 #' @export
-cv_fit <- function(model, data, folds = 5L) {
+cv_fit.mmsbm <- function(model, data, folds = 5L, ...) {
   items_per_fold <- structure_folds(data, folds)
 
   temp <- data
-  all_results <- vector("list", folds)
+  fold_stats <- vector("list", folds)
+  fold_params <- vector("list", folds)
 
   for (f in seq_len(folds)) {
     message(sprintf("Running fold %d of %d...", f, folds))
@@ -270,51 +347,68 @@ cv_fit <- function(model, data, folds = 5L) {
     train_data <- data[!rownames(data) %in% rownames(test_data), , drop = FALSE]
     temp       <- temp[-test_idx, , drop = FALSE]
 
-    # Fit and predict on this fold
-    model <- fit.mmsbm(model, train_data, silent = TRUE)
-    model <- predict.mmsbm(model, test_data)
-    results <- score.mmsbm(model, silent = TRUE)
+    # Fit on the training split
+    model_fold <- fit.mmsbm(model, train_data, silent = TRUE)
 
-    all_results[[f]] <- list(
-      stats   = results$stats,
-      objects = list(
-        theta = model$theta,
-        eta   = model$eta,
-        pr    = model$pr,
-        rat   = model$prediction_matrix
-      )
+    # Evaluate on the test split using internal functions
+    test_enc <- format_test_data(test_data, model_fold$encoding)
+    best <- model_fold$results[[model_fold$best_run]]
+    rat  <- prod_dist(test_enc, best$theta, best$eta, best$pr)
+    stats <- compute_stats(rat, test_enc, model_fold$ratings)
+
+    fold_stats[[f]] <- stats
+    fold_params[[f]] <- list(
+      theta      = model_fold$theta,
+      eta        = model_fold$eta,
+      pr         = model_fold$pr,
+      likelihood = model_fold$likelihood,
+      results    = model_fold$results,
+      best_run   = model_fold$best_run,
+      encoding   = model_fold$encoding,
+      train      = model_fold$train,
+      ratings    = model_fold$ratings
     )
   }
 
-  # Pick best fold and store its parameters
-  accuracies <- vapply(all_results, function(x) x$stats$accuracy, numeric(1L))
-  best <- which.max(accuracies)
-  model$theta             <- all_results[[best]]$objects$theta
-  model$eta               <- all_results[[best]]$objects$eta
-  model$pr                <- all_results[[best]]$objects$pr
-  model$prediction_matrix <- all_results[[best]]$objects$rat
+  # Build cv_results tibble
+  accs      <- vapply(fold_stats, function(s) s$accuracy, numeric(1L))
+  one_offs  <- vapply(fold_stats, function(s) s$one_off_accuracy, numeric(1L))
+  maes      <- vapply(fold_stats, function(s) s$mae, numeric(1L))
 
-  message(sprintf("Ran %d folds with accuracies %s.", folds,
-                  paste(format(accuracies, digits = 4), collapse = ", ")))
-  message(sprintf("They have mean %s and sd %s.",
-                  format(mean(accuracies), digits = 4),
-                  format(stats::sd(accuracies), digits = 4)))
+  model$cv_results <- tibble::tibble(
+    fold             = seq_len(folds),
+    accuracy         = accs,
+    one_off_accuracy = one_offs,
+    mae              = maes
+  )
 
-  accuracies
+  # Store the best fold's parameters on the model
+  best_fold <- which.max(accs)
+  model$theta      <- fold_params[[best_fold]]$theta
+  model$eta        <- fold_params[[best_fold]]$eta
+  model$pr         <- fold_params[[best_fold]]$pr
+  model$likelihood <- fold_params[[best_fold]]$likelihood
+  model$results    <- fold_params[[best_fold]]$results
+  model$best_run   <- fold_params[[best_fold]]$best_run
+  model$encoding   <- fold_params[[best_fold]]$encoding
+  model$train      <- fold_params[[best_fold]]$train
+  model$ratings    <- fold_params[[best_fold]]$ratings
+
+  message(sprintf(
+    "Ran %d folds with accuracies %s.",
+    folds, paste(format(accs, digits = 4), collapse = ", ")
+  ))
+  message(sprintf(
+    "Mean accuracy: %s +/- %s.",
+    format(mean(accs), digits = 4),
+    format(stats::sd(accs), digits = 4)
+  ))
+
+  model
 }
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
-
-#' Select the best run by accuracy
-#' @keywords internal
-choose_best_run <- function(rats, test, ratings) {
-  accs <- vapply(rats, function(rat) {
-    compute_stats(rat, test, ratings)$accuracy
-  }, numeric(1L))
-  which.max(accs)
-}
-
 
 #' Compute all evaluation statistics from a prediction matrix
 #' @keywords internal

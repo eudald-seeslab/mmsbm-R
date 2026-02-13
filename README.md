@@ -13,7 +13,7 @@ This is an R port of the [Python mmsbm package](https://github.com/eudald-seesla
 - Fast, vectorized EM implementation.
 - Support for both simple and cross-validated fitting.
 - Parallel processing for multiple sampling runs.
-- Model statistics and evaluation metrics.
+- Tidymodels-style API: `predict()` returns tibbles, `metrics()` returns yardstick-style output.
 
 ## Installation
 
@@ -58,7 +58,7 @@ model <- mmsbm(
 )
 ```
 
-> **Note on `sampling`**: Setting `sampling` to a value greater than 1 launches that many independent EM optimizations in parallel, each starting from a different random initialization. Once all runs finish, the one with the highest accuracy is selected. This increases the chances of finding a better solution at the cost of extra computation time.
+> **Note on `sampling`**: Setting `sampling` to a value greater than 1 launches that many independent EM optimizations in parallel, each starting from a different random initialization. Once all runs finish, the one with the highest training likelihood is selected. This increases the chances of finding a better solution at the cost of extra computation time.
 
 ### Parallel Backend
 
@@ -85,48 +85,107 @@ model <- fit(model, train)
 #### Cross-Validation Fit
 
 ```r
-accuracies <- cv_fit(model, train, folds = 5)
-cat(sprintf("Mean accuracy: %.3f ± %.3f\n", mean(accuracies), sd(accuracies)))
+model <- cv_fit(model, train, folds = 5)
+model$cv_results
+#> # A tibble: 5 × 4
+#>    fold accuracy one_off_accuracy   mae
+#>   <int>    <dbl>            <dbl> <dbl>
+#> 1     1    0.25             0.65  0.75
+#> ...
 ```
 
 ### Making Predictions
 
+`predict()` returns a tibble following tidymodels conventions:
+
 ```r
-model <- predict(model, test)
+# Predicted rating classes
+predict(model, test)
+#> # A tibble: 50 × 1
+#>   .pred_class
+#>   <chr>
+#> 1 3
+#> 2 5
+#> ...
+
+# Rating probability distributions
+predict(model, test, type = "prob")
+#> # A tibble: 50 × 5
+#>   .pred_1 .pred_2 .pred_3 .pred_4 .pred_5
+#>     <dbl>   <dbl>   <dbl>   <dbl>   <dbl>
+#> 1  0.102   0.153   0.398   0.245   0.102
+#> ...
+```
+
+### Augmenting Data
+
+`augment()` appends predictions to the original data:
+
+```r
+augment(model, test)
+#> # A tibble: 50 × 8
+#>   users items ratings .pred_class .pred_1 .pred_2 .pred_3 .pred_4 .pred_5
+#>   <chr> <chr>   <int> <chr>         <dbl>   <dbl>   <dbl>   <dbl>   <dbl>
+#> 1 user2 item3       4 3             0.102   0.153   0.398   0.245   0.102
+#> ...
 ```
 
 ### Model Evaluation
 
-> **Note**: you need to call `predict()` before calling `score()`.
+`metrics()` returns a yardstick-style tibble:
 
 ```r
-results <- score(model)
+metrics(model, test)
+#> # A tibble: 5 × 3
+#>   .metric          .estimator .estimate
+#>   <chr>            <chr>          <dbl>
+#> 1 accuracy         multiclass     0.35
+#> 2 one_off_accuracy multiclass     0.72
+#> 3 mae              standard       0.65
+#> 4 s2               standard      45
+#> 5 s2pond           standard      32.1
+```
 
-# Access various metrics
-results$stats$accuracy
-results$stats$mae
+### Unseen Users and Items
 
-# Access model parameters
-results$objects$theta  # User group memberships
-results$objects$eta    # Item group memberships
-results$objects$pr     # Rating probabilities
+MMSBM is a bipartite graph model: it learns latent group memberships for each user (theta) and each item (eta) from the observed interactions in the training data. This means that **predictions are only possible for users and items that appeared during training**. If `predict()`, `augment()`, or `metrics()` encounter unseen users or items, the affected rows are dropped with a warning:
+
+```r
+# If test data contains "user_new" not present in train:
+predict(model, test)
+#> Warning: Dropping 3 observation(s) with unseen users not present in the
+#> training set: user_new. The model has no learned group memberships (theta)
+#> for unseen users, because MMSBM estimates memberships from observed
+#> interactions only. To predict for new users, include them in the training
+#> data and refit the model.
+```
+
+The same applies to unseen items (no learned eta) and unseen rating levels (not covered by the learned probability tensor). To avoid dropped rows, ensure that all users, items, and rating levels in the test set also appear in the training set.
+
+### Model Parameters
+
+After fitting, model parameters are available directly:
+
+```r
+model$theta  # User group memberships
+model$eta    # Item group memberships
+model$pr     # Rating probabilities
 ```
 
 ## Tidy
 
-You can of course go all the way tidy:
+You can go all the way tidy:
 
 ```r
-reuslts <- mmsbm(
+metrics_df <- mmsbm(
   user_groups = 2,
   item_groups = 4,
   iterations  = 500,
   sampling    = 5,
   seed        = 1
-) |> 
+) |>
   fit(train) |>
-  predict(test) |>
-  score()
+  metrics(test)
 ```
 
 ## Running Tests
